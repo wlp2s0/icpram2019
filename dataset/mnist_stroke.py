@@ -6,7 +6,6 @@ import pickle
 
 class MNISTStroke(torch.utils.data.Dataset):
     url = "https://github.com/edwin-de-jong/mnist-digits-stroke-sequence-data/raw/master/sequences.tar.gz"
-    
     def __init__(self, loc, train=True, transform=None):
         self.location = loc if loc[-1] == "/" else loc+"/"
         self.transform = transform
@@ -18,7 +17,7 @@ class MNISTStroke(torch.utils.data.Dataset):
         if train:
             self.data = pickle.load(open(self.location+"processed/train", "rb"))
         else:
-            self.data = pickle.load(open(self.location+"processed/test", "rb"))
+            self.test_data = pickle.load(open(self.location+"processed/test", "rb"))
         
     def __getitem__(self, index):
         input = self.data[index]["input"]
@@ -51,11 +50,12 @@ class MNISTStroke(torch.utils.data.Dataset):
     
     def processFile(self, file):
         f = open(file)
-        return torch.tensor([[float(c) for c in line.rstrip().split(" ")] for line in f.readlines()])
+        tensor = torch.tensor([[float(c) for c in line.rstrip().split(" ")] for line in f.readlines()])
+        return tensor.view(1, tensor.shape[0], tensor.shape[1])
 
     def zerofill(self, input, max_len):
-        z = torch.zeros(max_len, input.shape[1])
-        z[0:input.shape[0]] = input
+        z = torch.zeros(1, max_len, input.shape[2])
+        z[0,:input.shape[1]] = input
         return z
 
     def process(self):
@@ -69,7 +69,7 @@ class MNISTStroke(torch.utils.data.Dataset):
                 data = {
                     "input": self.processFile(self.location+"raw/sequences/"+f)
                 }
-                if data["input"].shape[0] > max_len: max_len = data["input"].shape[0]  
+                if data["input"].shape[1] > max_len: max_len = data["input"].shape[1]  
                 if parts[0] == "trainimg":
                     train_data[int(parts[1])] = data
                 if parts[0] == "testimg":
@@ -93,3 +93,15 @@ class MNISTStroke(torch.utils.data.Dataset):
         pickle.dump(test_data, open(self.location+"processed/test", "wb"))
         pickle.dump(train_data, open(self.location+"processed/train", "wb"))
         
+
+'''
+from torchvision import transforms
+loader = torch.utils.data.DataLoader(
+        MNISTStroke(
+            "/tmp/mnist_stroke", train=True
+        ),batch_size=5, shuffle=True)
+
+
+for a,b in loader:
+    print(a,b)
+'''

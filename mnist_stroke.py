@@ -1,45 +1,86 @@
 import sys, os
 import torch
 from torchvision import datasets, transforms
+import torchsm
 from sacred import Experiment
 from sacred.observers import MongoObserver
 
 from dataset.mnist_stroke import MNISTStroke
-from utils import MovingAverage
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-ex = Experiment('icpram2019_stroke')
+ex = Experiment('icpram2019')
 
-from networks import *
+from utils import MovingAverage
+
+class Net(torchsm.BaseLayer):
+    def __init__(self, input, output, **kwargs):
+        torchsm.BaseLayer.__init__(self, input, output)
+
+        self.hidden_layers = kwargs["hidden_layers"] if "hidden_layers" in kwargs else 1
+        self.hidden_dim = kwargs["hidden_dim"] if "hidden_dim" in kwargs else 10
+        self.stig_dim = kwargs["stig_dim"]
+
+        self.n_inputs = input
+        self.n_outputs = output
+        
+        self.stigmergic_memory = torchsm.RecurrentStigmergicMemoryLayer(
+            self.n_inputs, self.stig_dim,
+            hidden_dim=kwargs["stig_hidden_dim"], hidden_layers=kwargs["stig_hidden_layers"],
+            )
+
+        self.classification_layer = torch.nn.Sequential()
+
+        if self.hidden_layers != 0:
+            self.classification_layer.add_module("input_w", torch.nn.Linear(self.stig_dim, self.hidden_dim))
+            self.classification_layer.add_module("input_s", torch.nn.PReLU())
+            
+            for i in range(0, self.hidden_layers-1):
+                self.classification_layer.add_module("l"+str(i)+"_w", torch.nn.Linear(self.hidden_dim, self.hidden_dim))
+                self.classification_layer.add_module("l"+str(i)+"_s", torch.nn.PReLU())
+            
+            self.classification_layer.add_module("output_w", torch.nn.Linear(self.hidden_dim, output))
+            self.classification_layer.add_module("output_s", torch.nn.PReLU())
+        else:
+            self.classification_layer.add_module("linear", torch.nn.Linear(self.n_inputs, output))
+            self.classification_layer.add_module("output_s", torch.nn.PReLU())
+    
+    def forward(self, input):
+        return self.classification_layer(
+            self.stigmergic_memory(input)
+        )
+
+    def reset(self):
+        self.stigmergic_memory.reset()
+    
+
+    def to(self, *args, **kwargs):
+        self = torchsm.BaseLayer.to(self, *args, **kwargs)
+        
+        self.stigmergic_memory = self.stigmergic_memory.to(*args, **kwargs)
+        self.classification_layer = self.classification_layer.to(*args, **kwargs)
+        return self
+
+
+
+        
 
 @ex.config
 def config():
-    arch = "stigmergic"
-
     batch_size = 20
     lr = 0.001
     total_its = 10
     
+    
     n_inputs = 4
     n_outputs = 10
 
-    if arch == "stigmergic":
-        stig_hidden_layers = 1
-        stig_hidden_dim = 20
-        stig_dim = 30
+    stig_hidden_layers = 1
+    stig_hidden_dim = 20
+    stig_dim = 15
 
-        hidden_dim=20
-        hidden_layers=1
-
-    if arch == "lstm":
-        hidden_size = 20
-        num_layers = 1
-    
-    if arch == "recurrent":
-        recurrent_dim = 30
-        recurrent_hidden = 50
-        hidden_dim = 50
+    hidden_dim=10
+    hidden_layers=1
 
     avg_window = 100
 
@@ -65,9 +106,10 @@ def init_loaders(batch_size):
     return (train_loader, test_loader)
 
 
+
 @ex.capture
-def getStigmergicNet(n_inputs, stig_hidden_dim, stig_hidden_layers, n_outputs, stig_dim, hidden_layers, hidden_dim, batch_size):
-    return StigmergicNet(
+def getNet(n_inputs, stig_hidden_dim, stig_hidden_layers, n_outputs, stig_dim, hidden_layers, hidden_dim, batch_size):
+    return Net(
         n_inputs, n_outputs,
         stig_hidden_dim=stig_hidden_dim, stig_hidden_layers=stig_hidden_layers,
         stig_dim=stig_dim, hidden_layers=hidden_layers,
@@ -75,35 +117,10 @@ def getStigmergicNet(n_inputs, stig_hidden_dim, stig_hidden_layers, n_outputs, s
     ).to(device)
 
 
-@ex.capture
-def getLSTMNet(n_inputs, n_outputs, hidden_size, num_layers):
-    return LSTMNet(
-        n_inputs, n_outputs, hidden_size, num_layers=num_layers
-    ).to(device)
-
-
-@ex.capture
-def getRecurrentNet(n_inputs, n_outputs, recurrent_dim, recurrent_hidden, hidden_dim):
-    return RecurrentNet(
-        n_inputs, n_outputs, recurrent_dim, recurrent_hidden=recurrent_hidden, classification_hidden=hidden_dim
-    ).to(device)
-
-
-@ex.capture
-def getNet(arch):
-    if arch == "stigmergic":
-        return getStigmergicNet()
-    if arch == "lstm":
-        return getLSTMNet()
-    if arch == "recurrent":
-        return getRecurrentNet()
-    else:
-        raise Exception("Unknown architecture: %s" % arch)
-
 
     
 @ex.capture
-def train(net, train_loader, _run, lr, total_its, avg_window, batch_size, n_outputs):
+def train(net, train_loader, _run, lr, total_its, avg_window):
     optimizer = torch.optim.Adam(net.parameters(), lr = lr)
     loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -112,17 +129,15 @@ def train(net, train_loader, _run, lr, total_its, avg_window, batch_size, n_outp
     
     for it in range(0, total_its):
         for epoch, (batch_data, batch_target) in enumerate(train_loader):
-            data = batch_data.to(device)
-            outs = torch.zeros(batch_size, n_outputs).to(device)
-
+            data = batch_data
+            out = None
             for i in range(0, data.shape[1]):
-                outs += net.forward(
+                out = net.forward(
                     torch.tensor(data[:,i],dtype=torch.float32,device=data.device)
-                    ) * (data[:, i, 3] == 1)[:, None].type(torch.float).to(data.device)
-
-            loss = loss_fn(outs, batch_target.type(torch.long).to(outs.device))            
+                    )
+            loss = loss_fn(out, batch_target.type(torch.long).to(out.device))            
             
-            _, preds = outs.max(1)
+            _, preds = out.max(1)
             acc = (preds == batch_target.to(device)).float().mean()
             overall_epoch = len(train_loader)*it + epoch
             print("epoch:",overall_epoch,"/",len(train_loader)*total_its,"batch loss:",loss.item(), "batch accuracy: ",acc.item())
@@ -140,19 +155,18 @@ def train(net, train_loader, _run, lr, total_its, avg_window, batch_size, n_outp
             net.reset()
 
 @ex.capture
-def test(net, test_loader, batch_size, n_outputs):
+def test(net, test_loader, batch_size):
     rights = 0.0
     tots = 0.0
     for batch_data, batch_target in test_loader:
-        data = batch_data.to(device)
-        outs = torch.zeros(batch_size, n_outputs).to(device)
-
+        data = preProcess(batch_data)
+        out = None
         for i in range(0, data.shape[1]):
-            outs += net.forward(
+            out = net.forward(
                 torch.tensor(data[:,i],dtype=torch.float32,device=data.device)
-                ) * (data[:, i, 3] == 1)[:, None].type(torch.float).to(data.device)
+                )
 
-        rights += (outs.max(1)[1] == (batch_target.to(data.device))).sum().item()
+        rights += (out.max(1)[1] == (batch_target.to(data.device))).sum().item()
         tots += batch_size
         net.reset()
     return rights/tots
@@ -166,5 +180,5 @@ def main():
     acc = test(net, test_loader)
     print("accuracy: ", acc)
     import pickle
-    pickle.dump(net, open("results/stigmem_stroke_"+str(acc), "wb"))
+    pickle.dump(net, open("results/stigmem_"+str(acc), "wb"))
     return acc

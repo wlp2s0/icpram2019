@@ -23,7 +23,7 @@ class Net(torchsm.BaseLayer):
         self.n_outputs = output
         
         self.stigmergic_memory = torchsm.RecurrentStigmergicMemoryLayer(
-            self.n_inputs, self.stig_dim,
+            self.n_inputs, self.stig_dim, 
             hidden_dim=kwargs["stig_hidden_dim"], hidden_layers=kwargs["stig_hidden_layers"],
             )
 
@@ -69,6 +69,7 @@ def config():
     lr = 0.001
     total_its = 10
     
+    regularization=0.001
     
     n_inputs = 28
     n_outputs = 10
@@ -128,8 +129,8 @@ def getNet(n_inputs, stig_hidden_dim, stig_hidden_layers, n_outputs, stig_dim, h
 
     
 @ex.capture
-def train(net, train_loader, _run, lr, total_its, time_ticks, avg_window):
-    optimizer = torch.optim.Adam(net.parameters(), lr = lr)
+def train(net, train_loader, _run, lr, total_its, time_ticks, avg_window,regularization):
+    optimizer = torch.optim.Adam(net.parameters(), lr = lr, weight_decay=regularization)
     loss_fn = torch.nn.CrossEntropyLoss()
 
     avg_loss = MovingAverage(avg_window)
